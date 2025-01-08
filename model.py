@@ -1,84 +1,65 @@
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.ensemble import RandomForestRegressor
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
-
+from datetime import datetime, timedelta
 import yfinance as yf
 import pandas as pd
 
-def fetch_stock_data(ticker, start_date, end_date):
+def fetch_stock_data(ticker, look_back=250):  # Fetch 250 trading days (~1 year)
     try:
         stock = yf.Ticker(ticker)
-        data = stock.history(start=start_date, end=end_date)
+
+        # Adjust the start date to include more historical data
+        today = datetime.today()
+        adjusted_start_date = today - timedelta(days=look_back)
+
+        # Fetch the stock data
+        data = stock.history(
+            start=adjusted_start_date.strftime('%Y-%m-%d'),
+            end=today.strftime('%Y-%m-%d')
+        )
+
         if data.empty:
-            raise ValueError("No data found for the given date range.")
+            raise ValueError(f"No data found for the training period: {adjusted_start_date} to {today}")
+
         return data
     except Exception as e:
         print(f"Error fetching data for {ticker}: {e}")
         return pd.DataFrame()
 
 class StockPerformanceModel:
-    def __init__(self, look_back=60):
+    def __init__(self, look_back=60, n_estimators=100):
         self.look_back = look_back
-        self.model = None
+        self.model = RandomForestRegressor(n_estimators=n_estimators, random_state=42)
         self.scaler = MinMaxScaler()
 
     def preprocess_data(self, data):
-        data = self.scaler.fit_transform(data[['Close']])
+        # Scale the 'Close' prices between 0 and 1
+        data_scaled = self.scaler.fit_transform(data[['Close']])
         X, y = [], []
-        for i in range(len(data) - self.look_back):
-            X.append(data[i:i + self.look_back])
-            y.append(data[i + self.look_back])
-        X, y = np.array(X), np.array(y)
-        return X, y
+
+        # Create the look-back dataset
+        for i in range(len(data_scaled) - self.look_back):
+            X.append(data_scaled[i:i + self.look_back].flatten())  # Flatten for RandomForest
+            y.append(data_scaled[i + self.look_back][0])  # Next price as target
+
+        return np.array(X), np.array(y)
 
     def train(self, data):
+        # Preprocess data and fit the model
         X, y = self.preprocess_data(data)
-        self.model = Sequential([
-            LSTM(50, return_sequences=True, input_shape=(self.look_back, 1)),
-            LSTM(50),
-            Dense(1)
-        ])
-        self.model.compile(optimizer='adam', loss='mean_squared_error')
-        self.model.fit(X, y, epochs=10, batch_size=32, verbose=0)
+        if len(X) == 0 or len(y) == 0:
+            raise ValueError("Insufficient data for training.")
+        self.model.fit(X, y)
 
-    def predict(self, data):
-        data_scaled = self.scaler.transform(data[['Close']])
-        X_test = [data_scaled[-self.look_back:]]
-        X_test = np.array(X_test)
-        predicted_scaled = self.model.predict(X_test)
-        predicted = self.scaler.inverse_transform(predicted_scaled)
-        return predicted[0, 0]
+    def predict(self, X):
+        # Predict and inverse transform the prediction
+        predicted_scaled = self.model.predict(X.reshape(1, -1))[0]
+        return self.scaler.inverse_transform([[predicted_scaled]])[0, 0]
 
-    def evaluate_model(model, test_data):
-        # Extract the actual values
-        actual_prices = test_data['Close'].values
-        
-        # Scale and preprocess the test data
-        data_scaled = model.scaler.transform(test_data[['Close']])
-        X_test, y_test = [], []
-        for i in range(len(data_scaled) - model.look_back):
-            X_test.append(data_scaled[i:i + model.look_back])
-            y_test.append(data_scaled[i + model.look_back])
-        X_test, y_test = np.array(X_test), np.array(y_test)
-
-        # Predict the scaled values
-        predicted_scaled = model.model.predict(X_test)
-        
-        # Inverse transform the predicted and actual values
-        predicted_prices = model.scaler.inverse_transform(predicted_scaled)
-        actual_prices = model.scaler.inverse_transform(y_test.reshape(-1, 1))
-
-        # Calculate MAPE
-        mape = np.mean(np.abs((actual_prices - predicted_prices) / actual_prices)) * 100
-
-        # Calculate Directional Accuracy
-        predicted_directions = np.sign(np.diff(predicted_prices.flatten()))
-        actual_directions = np.sign(np.diff(actual_prices.flatten()))
-        directional_accuracy = np.mean(predicted_directions == actual_directions) * 100
-
-        return mape, directional_accuracy
 # Workflow
 if __name__ == "__main__":
     # Parameters
